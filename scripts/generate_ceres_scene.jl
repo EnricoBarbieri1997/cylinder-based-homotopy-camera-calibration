@@ -105,8 +105,8 @@ end
 
 # ─── Perturbed starting solution ─────────────────────────────────────────────
 
-gamma = 100.0    # position-offset magnitude (matching compare_parameter_homotopies)
-beta  = gamma # 100.0    # additional rotation offset in degrees
+gamma = 23.0    # position-offset magnitude (matching compare_parameter_homotopies)
+beta  = gamma # 23.0    # additional rotation offset in degrees
 
 perturbed_K = K_true + [
     (rand() * 50.0 - 25.0)  0.0  (rand() * 10.0 - 5.0);

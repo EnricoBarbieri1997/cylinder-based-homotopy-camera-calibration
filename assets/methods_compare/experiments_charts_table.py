@@ -151,7 +151,7 @@ for metric in metrics:
                 variance = np.var(vals)
                 q25 = np.percentile(vals, 25)
                 q75 = np.percentile(vals, 75)
-                vals_iqr = vals
+                vals_iqr = vals[(vals >= q25) & (vals <= q75)]
                 mean = np.mean(vals_iqr) if len(vals_iqr) > 0 else np.mean(vals)
 
                 means.append(mean)
@@ -198,14 +198,7 @@ for metric in metrics:
     for label in plt.gca().yaxis.get_ticklabels():
         label.set_verticalalignment('top')
     if metric in ["delta_r", "delta_t", "delta_uv", "delta_f", "delta_skew"]:
-        plt.yscale(
-            "function",
-            functions=(
-                high_end_stretch_forward,
-                high_end_stretch_inverse,
-            ),
-        )
-        plt.ylim(bottom=0)
+        plt.yscale("log")
         # plt.gca().yaxis.set_major_locator(LogLocator(base=10.0, subs=[1.0]))
         # plt.gca().yaxis.set_major_formatter(FuncFormatter(customPlotFun))
     if metric in ["delta_skew"]:
