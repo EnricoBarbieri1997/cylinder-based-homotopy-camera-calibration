@@ -4,6 +4,7 @@ module Lab
     using StatsBase
     using LinearAlgebra: norm, normalize, dot, cross
     using Rotations
+    using LeastSquaresOptim
 
     using ..Scene: SceneData, InstanceConfiguration, intrinsic_rotation_system_setup
     using ..Camera: CameraProperties, CameraViewPair, random_camera_lookingat_center, lookat_quaternion
@@ -756,6 +757,35 @@ module Lab
         end
     end
 
+    """
+    Refine a 2D point solution using nonlinear least squares.
+
+    Given a point `sol = [x, y]` and a list of lines, minimizes the sum of squared
+    incidence errors (line · [x, y, 1])² using Levenberg-Marquardt.
+
+    Returns (refined_solution, optimization_result)
+    """
+    function refine_solution_nls(sol::Vector{Float64}, lines::Vector{Vector{Float64}})
+        # Residual function: incidence errors for all lines
+        function residual!(r, x)
+            for (i, l) in enumerate(lines)
+                r[i] = dot(l, [x[1], x[2], 1.0])
+            end
+        end
+
+        # Use LevenbergMarquardt algorithm
+        result = optimize!(
+            LeastSquaresProblem(
+                x = copy(sol),
+                f! = residual!,
+                output_length = length(lines)
+            ),
+            LevenbergMarquardt()
+        )
+
+        return result.minimizer, result
+    end
+
     function infinite_homography_homotopy()
         random_seed = 84564
         Random.seed!(random_seed)
@@ -948,7 +978,44 @@ module Lab
         display(dot(lines_view2[2], intersection_view2))
         display(intersection_view2)
 
-        return sols
+
+
+        display("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+
+        # Refinement step using NLS (LeastSquaresOptim)
+        display("Refining solutions with NLS (LeastSquaresOptim)...")
+        refined_sols = Vector{Vector{Float64}}()
+        for (i, sol) in enumerate(sols)
+            refined_sol, opt_result = refine_solution_nls(sol, [lines_view2[1], lines_view2[2]])
+            push!(refined_sols, refined_sol)
+
+            # Compare before/after
+            incidence_before = [abs(dot(l, [sol; 1.0])) for l in lines_view2]
+            incidence_after = [abs(dot(l, [refined_sol; 1.0])) for l in lines_view2]
+
+            display("  Solution $i:")
+            display("    Before NLS: incidence = $incidence_before")
+            display("    After NLS:  incidence = $incidence_after")
+        end
+
+        return refined_sols
+
+        results_total_degree = solve(
+            F;
+        )
+
+        # display("Found $(nsolutions(results_total_degree)) solutions for the total degree start system.")
+        # display("Solutions for the total degree start system:")
+        # for (i, sol) in enumerate(real_solutions(results_total_degree))
+        #     display("  Solution $i: $(sol)")
+        #     # Verify that the solution lies on both lines in view 2
+        #     l1 = lines_view2[1]
+        #     l2 = lines_view2[2]
+        #     incidence1 = abs(dot(l1, [sol; 1.0]))
+        #     incidence2 = abs(dot(l2, [sol; 1.0]))
+        #     display("    Incidence with line 1 in view 2: $incidence1 (should be ≈0)")
+        #     display("    Incidence with line 2 in view 2: $incidence2 (should be ≈0)")
+        # end
 
         # # Test line interpolation at various t values
         # t_values = [0.0, 0.25, 0.5, 0.75, 1.0]
