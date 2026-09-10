@@ -912,6 +912,16 @@ module Lab
             vps_view1  # 2 vanishing points for the 2 lines
         )
 
+        display("XXXXXXXXXXXXXXXXXXXXXXXXXX")
+        display(F.expressions)
+        display(F.parameters)
+        display(subs(expressions(F), l1 => lines_view2[1], l2 => lines_view2[2]))
+        display(lines_view2)
+        display(lines_view2[1])
+        display(lines_view2[2])
+        display("XXXXXXXXXXXXXXXXXXXXXXXXXX")
+
+
         result = solve(
             homotopy,
             [
@@ -934,7 +944,9 @@ module Lab
             display("    Incidence with line 2 in view 2: $incidence2 (should be ≈0)")
         end
 
-        display(intersection_view2[1:2])
+        display(dot(lines_view2[1], intersection_view2))
+        display(dot(lines_view2[2], intersection_view2))
+        display(intersection_view2)
 
         return sols
 

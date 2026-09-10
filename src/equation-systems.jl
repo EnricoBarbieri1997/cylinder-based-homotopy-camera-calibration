@@ -170,7 +170,13 @@ function build_intrinsic_rotation_conic_system(
     ]
 
     Kinv = inv_upper3(intrinsic)
-    ω = Kinv' * Kinv
+    ω = fₓ^2 * fᵧ^2 * (Kinv' * Kinv)
+
+    ω = expand.(ω)
+
+    display("---w---")
+    display(ω)
+    display("-------")
 
     IAC_constraints = []
 
