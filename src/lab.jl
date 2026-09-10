@@ -566,7 +566,7 @@ module Lab
                 0.0 0.0 1.0                                                      # bottom row
             ]
 
-            cylinders = arbitrary_rig()
+            cylinders = arbitrary_rig_four()
 
             cameras = []
             for _ in 1:2
@@ -626,10 +626,15 @@ module Lab
 
             solved_instances_parametric = 0
             solved_instances_line_parametric = 0
+            solved_instances_infinite_parametric = 0
+
             solved_paths_parametric = 0
             solved_paths_line_parametric = 0
+            solved_paths_infinite_parametric = 0
+
             tracked_paths_parametric = 0
             tracked_paths_line_parametric = 0
+            tracked_paths_infinite_parametric = 0
 
             for (i, scene) in enumerate(scenes)
                 display("Processing scene: $i")
@@ -700,9 +705,6 @@ module Lab
                     show_progress=false
                 )
 
-                display("Found $(nsolutions(parametric_result)) solutions with parametric homotopy")
-                display("Of which $(nreal(parametric_result)) are real")
-
                 line_parametric_result = solve(
                     GeometricHomotopy(
                         rotation_intrinsic_system,
@@ -711,6 +713,25 @@ module Lab
                     ),
                     monodromy_solutions;
                     show_progress=true
+                )
+
+
+                infinite_parametric_result = solve(
+                    InfiniteHomographyHomotopy(
+                        rotation_intrinsic_system,
+                        offsetted_parameters,
+                        parameters,
+                    ),
+                    monodromy_solutions;
+                    show_progress=true
+                )
+
+                homotopy = InfiniteHomographyHomotopy(
+                    F,
+                    p,
+                    q,
+                    Hinf,
+                    vps_view1  # 2 vanishing points for the 2 lines
                 )
 
                 display("Known solution: $known_solution")
