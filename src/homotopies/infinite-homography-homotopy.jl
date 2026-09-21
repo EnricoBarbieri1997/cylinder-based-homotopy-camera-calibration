@@ -4,45 +4,14 @@ using LinearAlgebra: cross, norm, normalize, dot, pinv, I, eigen, Diagonal
 using HomotopyContinuation
 
 """
-    pencil_basis(v)
+    line_angle(line1, line2)
 
-Compute two independent lines e, f that pass through point v (i.e., eᵀv = 0 and fᵀv = 0).
-These form a basis for the pencil of lines through v.
+Compute the angle between two lines in homogeneous coordinates. Second line defaults to X-axis line [1, 0, 0].
+Returns the angle in radians.
 """
-function pencil_basis(v::AbstractVector)
-    v = normalize(v)
-    vx, vy, vw = v[1], v[2], v[3]
-
-    # First basis line: perpendicular in x-y plane
-    if abs(vx) > abs(vy)
-        e = normalize([-vy, vx, 0.0])
-    else
-        e = normalize([vy, -vx, 0.0])
-    end
-
-    # Second basis line: orthogonal to both v and e in line space
-    # Use cross product in the dual space
-    f = cross(v, e)
-    f = normalize(f)
-
-    # Verify: eᵀv ≈ 0 and fᵀv ≈ 0
-    @assert abs(dot(e, v)) < 1e-10 "e must pass through v"
-    @assert abs(dot(f, v)) < 1e-10 "f must pass through v"
-
-    return e, f
-end
-
-"""
-    express_in_pencil_basis(line, e, f)
-
-Express a line in the pencil basis (e, f).
-Returns (λ, μ) such that line ≈ λ*e + μ*f.
-"""
-function express_in_pencil_basis(line::AbstractVector, e::AbstractVector, f::AbstractVector)
-    # Solve [e f] * [λ; μ] = line via pseudo-inverse
-    basis_matrix = hcat(e, f)  # 3x2
-    coeffs = pinv(basis_matrix) * line  # 2x1
-    return coeffs[1], coeffs[2]
+function line_angle(line1::AbstractVector, line2::AbstractVector = [1.0, 0.0, 0.0])
+    cos_theta = abs(dot(line1, line2)) / (norm(line1) * norm(line2))
+    return acos(clamp(cos_theta, -1.0, 1.0))
 end
 
 """
@@ -79,11 +48,12 @@ Supports multiple H_∞ matrices, where each line can use a different (H_∞, va
 via an index mapping.
 
 For each line ℓ₀ passing through vanishing point v₀, and target line ℓ₁ passing through v₁ = H_∞ * v₀,
-the homotopy interpolates using pencil coordinates:
-1. Express ℓ₀ = λ₀*e₀ + μ₀*f₀ where (e₀, f₀) is a basis of lines through v₀
-2. Transform basis: e_t = H_t^{-T} * e₀, f_t = H_t^{-T} * f₀ where H_t = exp(t*log(H_∞))
-3. Interpolate: (λ_t, μ_t) = (1-t)*(λ₀, μ₀) + t*(λ₁, μ₁)
-4. Reconstruct: ℓ_t = λ_t*e_t + μ_t*f_t
+the homotopy interpolates lines as follow:
+1. Compute angle of each starting and target line w.r.t the X-axis line [1, 0, 0]
+2. Computes angle difference difference between the starting and target lines
+3. Interpolate vanishing point: v_t = H_t * v₀
+4. Interpolate line angle: θ_t = (1-t)*θ₀ + t*θ₁
+5. Reconstruct ℓ_t as line passing by v_t with angle θ_t: ℓ_t = [cos(θ_t), sin(θ_t), -dot(v_t, [cos(θ_t), sin(θ_t)])]
 
 This ensures ℓ_t always passes through v_t = H_t * v₀.
 """
@@ -105,12 +75,9 @@ struct InfiniteHomographyHomotopy{T<:AbstractSystem} <: AbstractHomotopy
     h_indices::Vector{Int}  # h_indices[i] = group index for line i
 
     # Per-line precomputed data
-    pencil_bases_e::Vector{Vector{Float64}}    # e₀ for each line
-    pencil_bases_f::Vector{Vector{Float64}}    # f₀ for each line
-    lambda_start::Vector{Float64}              # λ₀ for each line
-    mu_start::Vector{Float64}                  # μ₀ for each line
-    lambda_target::Vector{Float64}             # λ₁ for each line
-    mu_target::Vector{Float64}                 # μ₁ for each line
+    angles_start::Vector{Float64}  # Precomputed angles of starting lines
+    angles_target::Vector{Float64}  # Precomputed angles of target lines
+    angle_diff::Vector{Float64}  # Precomputed angle difference between starting line and target line
 
     # Cache
     t_cache::Base.RefValue{ComplexF64}
@@ -224,12 +191,9 @@ function InfiniteHomographyHomotopy(
     H_t_invT_cache = [zeros(Float64, 3, 3) for _ in 1:num_groups]
 
     # Precompute per-line data
-    bases_e = Vector{Vector{Float64}}(undef, number_of_lines)
-    bases_f = Vector{Vector{Float64}}(undef, number_of_lines)
-    λ_start = zeros(Float64, number_of_lines)
-    μ_start = zeros(Float64, number_of_lines)
-    λ_target = zeros(Float64, number_of_lines)
-    μ_target = zeros(Float64, number_of_lines)
+    angles_start = zeros(Float64, number_of_lines)
+    angles_target = zeros(Float64, number_of_lines)
+    angles_diff = zeros(Float64, number_of_lines)
 
     for i in 1:number_of_lines
         idx = (i-1)*3 + 1
@@ -240,34 +204,19 @@ function InfiniteHomographyHomotopy(
         g = h_indices[i]
         v0 = vps_per_group[g]
 
-        # Compute pencil basis at v₀
-        e0, f0 = pencil_basis(v0)
-        bases_e[i] = e0
-        bases_f[i] = f0
+        # Compute angles of the start and target lines with respect to the vanishing point
+        angles_start[i] = line_angle(line_start, v0)
+        angles_target[i] = line_angle(line_target, v0)
 
-        # Express start line in pencil basis
-        λ_start[i], μ_start[i] = express_in_pencil_basis(line_start, e0, f0)
-
-        # Transform basis to target frame using THIS GROUP's H_inf
-        e1 = normalize(H_inf_invTs[g] * e0)
-        f1 = normalize(H_inf_invTs[g] * f0)
-
-        # Express target line in transformed pencil basis
-        λ_target[i], μ_target[i] = express_in_pencil_basis(line_target, e1, f1)
-
-        # Normalize pencil coordinates to unit norm
-        norm_start = sqrt(λ_start[i]^2 + μ_start[i]^2)
-        λ_start[i] /= norm_start
-        μ_start[i] /= norm_start
-
-        norm_target = sqrt(λ_target[i]^2 + μ_target[i]^2)
-        λ_target[i] /= norm_target
-        μ_target[i] /= norm_target
-
-        # Sign consistency: ensure we take the short path in projective space
-        if λ_start[i] * λ_target[i] + μ_start[i] * μ_target[i] < 0
-            λ_target[i] = -λ_target[i]
-            μ_target[i] = -μ_target[i]
+        # Ensure angles are within [0, 2π)
+        angles_start[i] = mod(angles_start[i], 2π)
+        angles_target[i] = mod(angles_target[i], 2π)
+        # Ensure the difference between start and target angles is within [-π, π)
+        angles_diff[i] = angles_target[i] - angles_start[i]
+        if angles_diff[i] > π
+            angles_diff[i] -= 2π
+        elseif angles_diff[i] < -π
+            angles_diff[i] += 2π
         end
     end
 
@@ -281,12 +230,9 @@ function InfiniteHomographyHomotopy(
         log_H_infs,
         vps_per_group,
         Vector{Int}(h_indices),
-        bases_e,
-        bases_f,
-        λ_start,
-        μ_start,
-        λ_target,
-        μ_target,
+        Vector{Float64}(angles_start),
+        Vector{Float64}(angles_target),
+        Vector{Float64}(angles_diff),
         Ref(complex(NaN)),
         pt,
         taylor_pt,
@@ -329,17 +275,14 @@ function interpolate_line(H::InfiniteHomographyHomotopy, line_idx::Int, t::Real)
     H_t = matrix_exp(t * H.log_H_infs[g])
     H_t_invT = inv(H_t)'
 
-    # Transform basis vectors: e_t = H_t^{-T} * e₀, f_t = H_t^{-T} * f₀
-    # IMPORTANT: Normalize to match the normalized basis used in constructor
-    e_t = normalize(H_t_invT * H.pencil_bases_e[line_idx])
-    f_t = normalize(H_t_invT * H.pencil_bases_f[line_idx])
-
-    # Interpolate pencil coordinates
-    λ_t = (1 - t) * H.lambda_start[line_idx] + t * H.lambda_target[line_idx]
-    μ_t = (1 - t) * H.mu_start[line_idx] + t * H.mu_target[line_idx]
+    # Interpolate angle for this line
+    θ_t = H.angles_start[line_idx] + t * H.angles_diff[line_idx]
+    
+    v_0 = H.vps_per_group[g]  # Get vanishing point for this group
+    v_t = H_t * v_0  # Transform vanishing point with H_t
 
     # Reconstruct interpolated line
-    line_t = λ_t * e_t + μ_t * f_t
+    line_t = [cos(θ_t), sin(θ_t), -dot(v_t, [cos(θ_t), sin(θ_t)])]
 
     return normalize(line_t)
 end
@@ -368,20 +311,15 @@ function tp!(H::InfiniteHomographyHomotopy, tinput::Union{ComplexF64,Float64})
         idx = (i-1)*3 + 1
         g = H.h_indices[i]  # Get group for this line
 
-        # Use cached H_t_invT for this group
-        H_t_invT = H.H_t_invT_cache[g]
-
-        # Transform basis vectors: e_t = H_t^{-T} * e₀, f_t = H_t^{-T} * f₀
-        # IMPORTANT: Normalize to match the normalized basis used in constructor
-        e_t = normalize(H_t_invT * H.pencil_bases_e[i])
-        f_t = normalize(H_t_invT * H.pencil_bases_f[i])
+        # Compute vanishing point in homogeneous coordinates
+        v_0 = H.vps_per_group[g]
+        v_t = H.H_t_cache[g] * v_0
 
         # Interpolate pencil coordinates
-        λ_t = (1 - t) * H.lambda_start[i] + t * H.lambda_target[i]
-        μ_t = (1 - t) * H.mu_start[i] + t * H.mu_target[i]
+        θ_t = H.angles_start[i] + t * H.angles_diff[i]
 
         # Reconstruct interpolated line
-        line_t = λ_t * e_t + μ_t * f_t
+        line_t = [cos(θ_t), sin(θ_t), -dot(v_t, [cos(θ_t), sin(θ_t)])]
 
         # Normalize for numerical stability
         line_t = line_t / norm(line_t)
