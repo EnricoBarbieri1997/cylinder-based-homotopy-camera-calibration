@@ -47,16 +47,20 @@ Supports multiple H_∞ matrices, where each line can use a different (H_∞, va
 via an index mapping.
 
 For each line ℓ₀ passing through vanishing point v₀, and target line ℓ₁ passing through v₁ = H_∞ * v₀,
-the homotopy interpolates lines as follows:
-1. Compute angle of each starting and target line (angle of normal direction: atan(b, a) for line [a,b,c])
-2. Compute angle difference between the starting and target lines (wrapped to [-π, π])
-3. Interpolate vanishing point: v_t = H_t * v₀ where H_t = exp(t * log(H_∞))
-4. Interpolate line angle: θ_t = θ₀ + t*(θ₁ - θ₀)
-5. Reconstruct ℓ_t as line passing through v_t=[vx,vy,vz] with angle θ_t:
-   c = -(cos(θ_t)*vx + sin(θ_t)*vy) / vz
-   ℓ_t = [cos(θ_t), sin(θ_t), c]
+the homotopy interpolates lines using intersection-point interpolation:
 
-This ensures ℓ_t always passes through v_t = H_t * v₀.
+1. Find a partner line with a DIFFERENT VP (to ensure finite intersection)
+2. Compute intersection with partner at start: p_start = cross(ℓ₀, partner₀)
+3. Compute intersection with partner at target: p_target = cross(ℓ₁, partner₁)
+4. Interpolate intersection point: p_t = t * p_start + (1-t) * p_target
+5. Interpolate vanishing point: v_t = H_t * v₀ where H_t = exp((1-t) * log(H_∞))
+6. Reconstruct ℓ_t as line through v_t and p_t: ℓ_t = cross(v_t, p_t)
+
+This ensures:
+- ℓ_t always passes through v_t (the interpolated VP)
+- No parallel-line singularities (since partners have different VPs)
+
+Note: HomotopyContinuation convention is t=1 → start, t=0 → target.
 """
 struct InfiniteHomographyHomotopy{T<:AbstractSystem} <: AbstractHomotopy
     F::T
@@ -72,6 +76,10 @@ struct InfiniteHomographyHomotopy{T<:AbstractSystem} <: AbstractHomotopy
 
     # Line-to-group mapping
     h_indices::Vector{Int}  # h_indices[i] = group index for line i
+
+    # Partner indices for intersection computation
+    # partner_indices[i] = index of a line with a DIFFERENT VP, used to compute intersection
+    partner_indices::Vector{Int}
 
     # Per-line precomputed data
     angles_start::Vector{Float64}  # Precomputed angles of starting lines
@@ -185,6 +193,26 @@ function InfiniteHomographyHomotopy(
     # Initialize H_t cache (will be computed in tp!)
     H_t_cache = [zeros(Float64, 3, 3) for _ in 1:num_groups]
 
+    # Compute partner indices: for each line, find a partner with a DIFFERENT VP
+    # This ensures their intersection is a finite point (not the VP at infinity)
+    partner_indices = zeros(Int, number_of_lines)
+    for i in 1:number_of_lines
+        my_group = h_indices[i]
+        # Find first line with a different group
+        partner_found = false
+        for j in 1:number_of_lines
+            if h_indices[j] != my_group
+                partner_indices[i] = j
+                partner_found = true
+                break
+            end
+        end
+        if !partner_found
+            error("Line $i (group $my_group) has no partner with a different VP. " *
+                  "All lines share the same VP, which means they're all parallel and never intersect at a finite point.")
+        end
+    end
+
     # Precompute per-line data
     angles_start = zeros(Float64, number_of_lines)
     angles_target = zeros(Float64, number_of_lines)
@@ -219,6 +247,7 @@ function InfiniteHomographyHomotopy(
         log_H_infs,
         vps_per_group,
         Vector{Int}(h_indices),
+        Vector{Int}(partner_indices),
         Vector{Float64}(angles_start),
         Vector{Float64}(angles_target),
         Vector{Float64}(angles_diff),
@@ -259,7 +288,8 @@ Returns the interpolated line in homogeneous coordinates.
 Note: HomotopyContinuation convention is t=1 → start, t=0 → target.
 
 Uses intersection-point interpolation: the line passes through its vanishing point
-and a linearly interpolated intersection point, avoiding parallel-line singularities.
+and a linearly interpolated intersection point (computed with a partner line that
+has a different VP), avoiding parallel-line singularities.
 """
 function interpolate_line(H::InfiniteHomographyHomotopy, line_idx::Int, t::Real)
     g = H.h_indices[line_idx]  # Get group for this line
@@ -270,15 +300,21 @@ function interpolate_line(H::InfiniteHomographyHomotopy, line_idx::Int, t::Real)
     v_0 = H.vanishing_points_per_group[g]  # Get vanishing point for this group
     v_t = H_t * v_0  # Transform vanishing point with H_t (homogeneous 3D)
 
-    # Compute start and target intersection points (using first two lines)
-    start_line1 = real.(H.p[1:3])
-    start_line2 = real.(H.p[4:6])
-    start_intersection = cross(start_line1, start_line2)
+    # Get partner line (has different VP, so intersection is finite)
+    partner_idx = H.partner_indices[line_idx]
+
+    # Compute intersection with partner at start (t=1)
+    idx_self = (line_idx - 1) * 3 + 1
+    idx_partner = (partner_idx - 1) * 3 + 1
+    start_line_self = real.(H.p[idx_self:idx_self+2])
+    start_line_partner = real.(H.p[idx_partner:idx_partner+2])
+    start_intersection = cross(start_line_self, start_line_partner)
     start_intersection = start_intersection / start_intersection[3]
 
-    target_line1 = real.(H.q[1:3])
-    target_line2 = real.(H.q[4:6])
-    target_intersection = cross(target_line1, target_line2)
+    # Compute intersection with partner at target (t=0)
+    target_line_self = real.(H.q[idx_self:idx_self+2])
+    target_line_partner = real.(H.q[idx_partner:idx_partner+2])
+    target_intersection = cross(target_line_self, target_line_partner)
     target_intersection = target_intersection / target_intersection[3]
 
     # Interpolate intersection point: t=1 → start, t=0 → target
@@ -310,30 +346,14 @@ Returns a vector of length 3*number_of_lines.
 Note: HomotopyContinuation convention is t=1 → start, t=0 → target.
 So we interpolate: params(t) = params_start when t=1, params_target when t=0.
 
-Algorithm: interpolate the intersection point of all lines, then reconstruct
-each line as passing through its vanishing point and the interpolated intersection.
+Algorithm: for each line, compute its intersection with a partner line (that has
+a different VP), interpolate that intersection point, then reconstruct the line
+as passing through its VP and the interpolated intersection.
 This avoids singularities where lines become parallel.
 """
 function compute_parameters_at_t(H::InfiniteHomographyHomotopy, t::Real)
     number_of_lines = length(H.h_indices)
     parameters = zeros(3 * number_of_lines)
-
-    # First, compute start and target intersection points
-    # Start intersection: cross product of first two start lines (t=1)
-    start_line1 = real.(H.p[1:3])
-    start_line2 = real.(H.p[4:6])
-    start_intersection = cross(start_line1, start_line2)
-    start_intersection = start_intersection / start_intersection[3]  # Dehomogenize
-
-    # Target intersection: cross product of first two target lines (t=0)
-    target_line1 = real.(H.q[1:3])
-    target_line2 = real.(H.q[4:6])
-    target_intersection = cross(target_line1, target_line2)
-    target_intersection = target_intersection / target_intersection[3]  # Dehomogenize
-
-    # Interpolate intersection point: t=1 → start, t=0 → target
-    # intersection(t) = t * start + (1-t) * target
-    intersection_t = t * start_intersection + (1 - t) * target_intersection
 
     for i in 1:number_of_lines
         idx = (i-1)*3 + 1
@@ -345,6 +365,25 @@ function compute_parameters_at_t(H::InfiniteHomographyHomotopy, t::Real)
         H_t = matrix_exp((1 - t) * H.log_H_infs[g])
         v_0 = H.vanishing_points_per_group[g]
         v_t = H_t * v_0
+
+        # Get partner line (has different VP, so intersection is finite)
+        partner_idx = H.partner_indices[i]
+        idx_partner = (partner_idx - 1) * 3 + 1
+
+        # Compute intersection with partner at start (t=1)
+        start_line_self = real.(H.p[idx:idx+2])
+        start_line_partner = real.(H.p[idx_partner:idx_partner+2])
+        start_intersection = cross(start_line_self, start_line_partner)
+        start_intersection = start_intersection / start_intersection[3]
+
+        # Compute intersection with partner at target (t=0)
+        target_line_self = real.(H.q[idx:idx+2])
+        target_line_partner = real.(H.q[idx_partner:idx_partner+2])
+        target_intersection = cross(target_line_self, target_line_partner)
+        target_intersection = target_intersection / target_intersection[3]
+
+        # Interpolate intersection point: t=1 → start, t=0 → target
+        intersection_t = t * start_intersection + (1 - t) * target_intersection
 
         # Line through vanishing point and intersection point
         line_t = line_through_two_points(v_t, intersection_t)

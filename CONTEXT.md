@@ -32,15 +32,18 @@ Changed from angle-based interpolation to **intersection-point interpolation** t
 **Problem with angle-based approach:** When interpolating line angles independently, lines can become parallel at intermediate t values (when angles cross), causing the intersection point to go to infinity and path tracking to fail.
 
 **New approach:**
-1. Compute start intersection point: `p_start = cross(line1_start, line2_start)`
-2. Compute target intersection point: `p_target = cross(line1_target, line2_target)`
-3. Interpolate intersection point linearly: `p_t = t * p_start + (1-t) * p_target`
-4. Interpolate vanishing point: `v_t = H_t * v_0` where `H_t = exp((1-t) * log(H_∞))`
-5. Reconstruct each line as passing through its VP and the interpolated intersection: `line_t = cross(v_t, p_t)`
+1. For each line, find a **partner line with a different VP** (stored in `partner_indices`)
+2. Compute intersection with partner at start: `p_start = cross(line_self, line_partner)`
+3. Compute intersection with partner at target: `p_target = cross(line_self, line_partner)`
+4. Interpolate intersection point linearly: `p_t = t * p_start + (1-t) * p_target`
+5. Interpolate vanishing point: `v_t = H_t * v_0` where `H_t = exp((1-t) * log(H_∞))`
+6. Reconstruct line as passing through its VP and the interpolated intersection: `line_t = cross(v_t, p_t)`
+
+**Why partner indices?** Lines sharing the same VP are parallel - their intersection is the VP at infinity. Using a partner with a different VP ensures a finite intersection point.
 
 **HomotopyContinuation convention:** `t=1 → start parameters`, `t=0 → target parameters`
 
-**Limitation:** Currently requires exactly 2 lines (to define a unique intersection point).
+**Requirement:** At least two different VP groups must exist (otherwise all lines are parallel).
 
 ### Known Issues
 
@@ -67,13 +70,14 @@ struct InfiniteHomographyHomotopy
     log_H_infs::Vector{Matrix{Float64}}       # log(H_∞) for each group
     vanishing_points_per_group::Vector{Vector{Float64}}
     h_indices::Vector{Int}                    # Line-to-group mapping
+    partner_indices::Vector{Int}              # Partner with different VP for intersection
     angles_start, angles_target, angle_diff   # Per-line angle data (kept for reference)
     t_cache, pt, taylor_pt                    # Caching for efficiency
     H_t_cache::Vector{Matrix{Float64}}        # H_t matrices per group
 end
 ```
 
-**Removed fields:** `H_inf_invs`, `H_inf_invTs`, `H_t_invT_cache` (no longer needed with intersection-based approach)
+**Partner indices:** For each line i, `partner_indices[i]` is a line with a different VP. This ensures their intersection is at a finite point, not at infinity.
 
 ---
 
