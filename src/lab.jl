@@ -16,7 +16,7 @@ module Lab
     using ..EquationSystems.Problems: CylinderCameraContoursProblem, CylinderCameraContoursProblemValidationData
     using ..EquationSystems.Problems.IntrinsicParameters: Configurations as IntrinsicParametersConfigurations
     using ..Utils: rand_in_range, lines_clp_to_stack
-    using ..Homotopies: GeometricHomotopy, InfiniteHomographyHomotopy, interpolate_line, verify_line_through_vanishing_point
+    using ..Homotopies: GeometricHomotopy, InfiniteHomographyHomotopy, interpolate_line
     using ..Homotopies
     using ..Printing: print_scene_config_results, scene_config_results_table_data
 
@@ -963,14 +963,40 @@ module Lab
             vps_view1  # 2 vanishing points for the 2 lines
         )
 
-        display("XXXXXXXXXXXXXXXXXXXXXXXXXX")
-        display(F.expressions)
-        display(F.parameters)
-        display(subs(expressions(F), l1 => lines_view2[1], l2 => lines_view2[2]))
-        display(lines_view2)
-        display(lines_view2[1])
-        display(lines_view2[2])
-        display("XXXXXXXXXXXXXXXXXXXXXXXXXX")
+        # Debug: verify homotopy interpolation
+        display("Debugging homotopy interpolation:")
+        display("  Precomputed angles:")
+        display("    angles_start: $(homotopy.angles_start)")
+        display("    angles_target: $(homotopy.angles_target)")
+        display("    angle_diff: $(homotopy.angle_diff)")
+
+        # Check interpolated lines at various t values
+        t_values = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        display("  Intersection points along path:")
+        for t in t_values
+            line1 = interpolate_line(homotopy, 1, t)
+            line2 = interpolate_line(homotopy, 2, t)
+            intersection = cross(line1, line2)
+            if abs(intersection[3]) > 1e-10
+                intersection = intersection / intersection[3]
+                display("    t=$t: ($(round(intersection[1], digits=2)), $(round(intersection[2], digits=2)))")
+            else
+                display("    t=$t: PARALLEL LINES (point at infinity)")
+            end
+        end
+
+        # Check interpolated lines at t=0 and t=1
+        for i in 1:n_lines_for_system
+            line_t0 = interpolate_line(homotopy, i, 0.0)
+            line_t1 = interpolate_line(homotopy, i, 1.0)
+            display("  Line $i:")
+            display("    Original start:  $(lines_view1[i])")
+            display("    Interpolated t=0: $line_t0")
+            display("    Dot product at t=0: $(abs(dot(line_t0, normalize(lines_view1[i]))))")
+            display("    Original target: $(lines_view2[i])")
+            display("    Interpolated t=1: $line_t1")
+            display("    Dot product at t=1: $(abs(dot(line_t1, normalize(lines_view2[i]))))")
+        end
 
 
         result = solve(
@@ -980,6 +1006,11 @@ module Lab
             ];
             show_progress=true
         )
+
+        display("Solver result:")
+        display(result)
+        display("All path results:")
+        display(path_results(result))
 
         sols = real_solutions(result)
         display("Found $(nsolutions(result)) solutions for the intersection point:")

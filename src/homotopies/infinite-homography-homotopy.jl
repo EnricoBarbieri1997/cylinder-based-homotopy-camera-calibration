@@ -4,14 +4,13 @@ using LinearAlgebra: cross, norm, normalize, dot, pinv, I, eigen, Diagonal
 using HomotopyContinuation
 
 """
-    line_angle(line1, line2)
+    line_angle(line)
 
-Compute the angle between two lines in homogeneous coordinates. Second line defaults to X-axis line [1, 0, 0].
-Returns the angle in radians.
+Compute the angle of a line's normal direction with respect to the x-axis.
+For a line `l = [a, b, c]`, returns `atan(b, a)` in radians.
 """
-function line_angle(line1::AbstractVector, line2::AbstractVector = [1.0, 0.0, 0.0])
-    cos_theta = abs(dot(line1, line2)) / (norm(line1) * norm(line2))
-    return acos(clamp(cos_theta, -1.0, 1.0))
+function line_angle(line::AbstractVector)
+    return atan(line[2], line[1])
 end
 
 """
@@ -48,12 +47,14 @@ Supports multiple H_∞ matrices, where each line can use a different (H_∞, va
 via an index mapping.
 
 For each line ℓ₀ passing through vanishing point v₀, and target line ℓ₁ passing through v₁ = H_∞ * v₀,
-the homotopy interpolates lines as follow:
-1. Compute angle of each starting and target line w.r.t the X-axis line [1, 0, 0]
-2. Computes angle difference difference between the starting and target lines
-3. Interpolate vanishing point: v_t = H_t * v₀
-4. Interpolate line angle: θ_t = (1-t)*θ₀ + t*θ₁
-5. Reconstruct ℓ_t as line passing by v_t with angle θ_t: ℓ_t = [cos(θ_t), sin(θ_t), -dot(v_t, [cos(θ_t), sin(θ_t)])]
+the homotopy interpolates lines as follows:
+1. Compute angle of each starting and target line (angle of normal direction: atan(b, a) for line [a,b,c])
+2. Compute angle difference between the starting and target lines (wrapped to [-π, π])
+3. Interpolate vanishing point: v_t = H_t * v₀ where H_t = exp(t * log(H_∞))
+4. Interpolate line angle: θ_t = θ₀ + t*(θ₁ - θ₀)
+5. Reconstruct ℓ_t as line passing through v_t=[vx,vy,vz] with angle θ_t:
+   c = -(cos(θ_t)*vx + sin(θ_t)*vy) / vz
+   ℓ_t = [cos(θ_t), sin(θ_t), c]
 
 This ensures ℓ_t always passes through v_t = H_t * v₀.
 """
@@ -64,8 +65,6 @@ struct InfiniteHomographyHomotopy{T<:AbstractSystem} <: AbstractHomotopy
 
     # Arrays of H_inf matrices (one per group)
     H_infs::Vector{Matrix{Float64}}        # H_∞ for each group
-    H_inf_invs::Vector{Matrix{Float64}}    # H_∞⁻¹ for each group
-    H_inf_invTs::Vector{Matrix{Float64}}   # H_∞^{-T} for each group
     log_H_infs::Vector{Matrix{Float64}}    # log(H_∞) for each group
 
     # Vanishing points per group
@@ -86,7 +85,6 @@ struct InfiniteHomographyHomotopy{T<:AbstractSystem} <: AbstractHomotopy
 
     # H_t cache per group (optimization)
     H_t_cache::Vector{Matrix{Float64}}
-    H_t_invT_cache::Vector{Matrix{Float64}}
 end
 
 # Named parameters version (supports both legacy single H_inf and new multiple H_infs API)
@@ -179,16 +177,13 @@ function InfiniteHomographyHomotopy(
 
     # Precompute per-group homography matrices
     H_infs_f = [Matrix{Float64}(H) for H in H_infs]
-    H_inf_invs = [Matrix{Float64}(inv(H)) for H in H_infs_f]
-    H_inf_invTs = [Matrix{Float64}(inv(H)') for H in H_infs_f]
     log_H_infs = [matrix_log(H) for H in H_infs_f]
 
     # Normalize vanishing points per group
     vps_per_group = [normalize(Vector{Float64}(v)) for v in vanishing_points_per_group]
 
-    # Initialize H_t caches (will be computed in tp!)
+    # Initialize H_t cache (will be computed in tp!)
     H_t_cache = [zeros(Float64, 3, 3) for _ in 1:num_groups]
-    H_t_invT_cache = [zeros(Float64, 3, 3) for _ in 1:num_groups]
 
     # Precompute per-line data
     angles_start = zeros(Float64, number_of_lines)
@@ -200,13 +195,9 @@ function InfiniteHomographyHomotopy(
         line_start = real.(p[idx:idx+2])
         line_target = real.(q[idx:idx+2])
 
-        # Get the group index and corresponding vanishing point
-        g = h_indices[i]
-        v0 = vps_per_group[g]
-
-        # Compute angles of the start and target lines with respect to the vanishing point
-        angles_start[i] = line_angle(line_start, v0)
-        angles_target[i] = line_angle(line_target, v0)
+        # Compute angles of the start and target lines (angle of normal direction)
+        angles_start[i] = line_angle(line_start)
+        angles_target[i] = line_angle(line_target)
 
         # Ensure angles are within [0, 2π)
         angles_start[i] = mod(angles_start[i], 2π)
@@ -225,8 +216,6 @@ function InfiniteHomographyHomotopy(
         p̂,
         q̂,
         H_infs_f,
-        H_inf_invs,
-        H_inf_invTs,
         log_H_infs,
         vps_per_group,
         Vector{Int}(h_indices),
@@ -236,8 +225,7 @@ function InfiniteHomographyHomotopy(
         Ref(complex(NaN)),
         pt,
         taylor_pt,
-        H_t_cache,
-        H_t_invT_cache
+        H_t_cache
     )
 end
 
@@ -267,70 +255,133 @@ end
 
 Interpolate line `line_idx` at parameter t ∈ [0,1].
 Returns the interpolated line in homogeneous coordinates.
+
+Note: HomotopyContinuation convention is t=1 → start, t=0 → target.
+
+Uses intersection-point interpolation: the line passes through its vanishing point
+and a linearly interpolated intersection point, avoiding parallel-line singularities.
 """
 function interpolate_line(H::InfiniteHomographyHomotopy, line_idx::Int, t::Real)
     g = H.h_indices[line_idx]  # Get group for this line
 
-    # Compute H_t = exp(t * log(H_∞)) for this group
-    H_t = matrix_exp(t * H.log_H_infs[g])
-    H_t_invT = inv(H_t)'
+    # Compute H_t: at t=1 → I, at t=0 → H_∞
+    H_t = matrix_exp((1 - t) * H.log_H_infs[g])
 
-    # Interpolate angle for this line
-    θ_t = H.angles_start[line_idx] + t * H.angles_diff[line_idx]
-    
-    v_0 = H.vps_per_group[g]  # Get vanishing point for this group
-    v_t = H_t * v_0  # Transform vanishing point with H_t
+    v_0 = H.vanishing_points_per_group[g]  # Get vanishing point for this group
+    v_t = H_t * v_0  # Transform vanishing point with H_t (homogeneous 3D)
 
-    # Reconstruct interpolated line
-    line_t = [cos(θ_t), sin(θ_t), -dot(v_t, [cos(θ_t), sin(θ_t)])]
+    # Compute start and target intersection points (using first two lines)
+    start_line1 = real.(H.p[1:3])
+    start_line2 = real.(H.p[4:6])
+    start_intersection = cross(start_line1, start_line2)
+    start_intersection = start_intersection / start_intersection[3]
 
-    return normalize(line_t)
+    target_line1 = real.(H.q[1:3])
+    target_line2 = real.(H.q[4:6])
+    target_intersection = cross(target_line1, target_line2)
+    target_intersection = target_intersection / target_intersection[3]
+
+    # Interpolate intersection point: t=1 → start, t=0 → target
+    intersection_t = t * start_intersection + (1 - t) * target_intersection
+
+    # Line through vanishing point and intersection point
+    line_t = line_through_two_points(v_t, intersection_t)
+
+    return line_t
+end
+
+"""
+    line_through_two_points(p1, p2)
+
+Compute the line passing through two homogeneous points.
+Returns the line in homogeneous coordinates [a, b, c] such that a*x + b*y + c = 0.
+"""
+function line_through_two_points(p1::AbstractVector, p2::AbstractVector)
+    line = cross(p1, p2)
+    return line / norm(line)
+end
+
+"""
+    compute_parameters_at_t(H, t)
+
+Compute the interpolated line parameters at time t (without caching).
+Returns a vector of length 3*number_of_lines.
+
+Note: HomotopyContinuation convention is t=1 → start, t=0 → target.
+So we interpolate: params(t) = params_start when t=1, params_target when t=0.
+
+Algorithm: interpolate the intersection point of all lines, then reconstruct
+each line as passing through its vanishing point and the interpolated intersection.
+This avoids singularities where lines become parallel.
+"""
+function compute_parameters_at_t(H::InfiniteHomographyHomotopy, t::Real)
+    number_of_lines = length(H.h_indices)
+    parameters = zeros(3 * number_of_lines)
+
+    # First, compute start and target intersection points
+    # Start intersection: cross product of first two start lines (t=1)
+    start_line1 = real.(H.p[1:3])
+    start_line2 = real.(H.p[4:6])
+    start_intersection = cross(start_line1, start_line2)
+    start_intersection = start_intersection / start_intersection[3]  # Dehomogenize
+
+    # Target intersection: cross product of first two target lines (t=0)
+    target_line1 = real.(H.q[1:3])
+    target_line2 = real.(H.q[4:6])
+    target_intersection = cross(target_line1, target_line2)
+    target_intersection = target_intersection / target_intersection[3]  # Dehomogenize
+
+    # Interpolate intersection point: t=1 → start, t=0 → target
+    # intersection(t) = t * start + (1-t) * target
+    intersection_t = t * start_intersection + (1 - t) * target_intersection
+
+    for i in 1:number_of_lines
+        idx = (i-1)*3 + 1
+        g = H.h_indices[i]
+
+        # Compute H_t and vanishing point at time t
+        # At t=1: H_t = I, v_t = v_0 (start)
+        # At t=0: H_t = H_∞, v_t = H_∞ * v_0 (target)
+        H_t = matrix_exp((1 - t) * H.log_H_infs[g])
+        v_0 = H.vanishing_points_per_group[g]
+        v_t = H_t * v_0
+
+        # Line through vanishing point and intersection point
+        line_t = line_through_two_points(v_t, intersection_t)
+
+        parameters[idx:idx+2] = line_t
+    end
+
+    return parameters
 end
 
 """
     tp!(H, t)
 
 Compute interpolated parameters at time t and update the Taylor vector cache.
+Uses numerical differentiation for the Taylor coefficients since the interpolation is non-linear.
 """
 function tp!(H::InfiniteHomographyHomotopy, tinput::Union{ComplexF64,Float64})
     tinput == H.t_cache[] && return H.taylor_pt
     t = real(tinput)
 
-    number_of_lines = length(H.h_indices)
-    num_groups = length(H.H_infs)
-    parameters = zeros(3 * number_of_lines)
+    # Compute parameters at current t
+    parameters = compute_parameters_at_t(H, t)
 
-    # Compute H_t for each group ONCE (optimization)
-    for g in 1:num_groups
-        H_t = matrix_exp(t * H.log_H_infs[g])
-        H.H_t_cache[g] .= H_t
-        H.H_t_invT_cache[g] .= inv(H_t)'
-    end
+    # Compute derivative numerically using central differences
+    ε = 1e-7
+    t_lo = max(0.0, t - ε)
+    t_hi = min(1.0, t + ε)
+    Δt = t_hi - t_lo
 
-    for i in 1:number_of_lines
-        idx = (i-1)*3 + 1
-        g = H.h_indices[i]  # Get group for this line
-
-        # Compute vanishing point in homogeneous coordinates
-        v_0 = H.vps_per_group[g]
-        v_t = H.H_t_cache[g] * v_0
-
-        # Interpolate pencil coordinates
-        θ_t = H.angles_start[i] + t * H.angles_diff[i]
-
-        # Reconstruct interpolated line
-        line_t = [cos(θ_t), sin(θ_t), -dot(v_t, [cos(θ_t), sin(θ_t)])]
-
-        # Normalize for numerical stability
-        line_t = line_t / norm(line_t)
-
-        parameters[idx:idx+2] = line_t
-    end
+    params_lo = compute_parameters_at_t(H, t_lo)
+    params_hi = compute_parameters_at_t(H, t_hi)
+    derivatives = (params_hi - params_lo) / Δt
 
     @inbounds for i = 1:length(H.taylor_pt)
         ptᵢ = parameters[i]
         H.pt[i] = ptᵢ
-        H.taylor_pt[i] = (ptᵢ, H.p[i] - H.q[i])
+        H.taylor_pt[i] = (ptᵢ, derivatives[i])
     end
     H.t_cache[] = tinput
 
@@ -357,12 +408,15 @@ end
 
 Verify that the interpolated line at time t passes through the interpolated vanishing point.
 Returns the absolute value of ℓ_tᵀ * v_t (should be ≈ 0).
+
+Note: Uses HC convention where t=1 → start, t=0 → target.
 """
 function verify_line_through_vanishing_point(H::InfiniteHomographyHomotopy, line_idx::Int, t::Real)
     g = H.h_indices[line_idx]  # Get group for this line
 
     # Compute v_t = H_t * v₀ using THIS GROUP's H_inf
-    H_t = matrix_exp(t * H.log_H_infs[g])
+    # HC convention: t=1 → I (start), t=0 → H_∞ (target)
+    H_t = matrix_exp((1 - t) * H.log_H_infs[g])
     v_t = H_t * H.vanishing_points_per_group[g]
     v_t = normalize(v_t)
 
