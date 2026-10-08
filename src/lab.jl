@@ -808,7 +808,7 @@ module Lab
     end
 
     function infinite_homography_homotopy()
-        random_seed = 84564
+        random_seed = 95832
         Random.seed!(random_seed)
 
         # 4 vanishing points needed to compute H_∞ via DLT (4 correspondences)
