@@ -159,6 +159,73 @@ end
 
 ---
 
+## Lab: infinite_homography_resection_homotopy — calibrated pose tracking (2026-10-08)
+
+**Status: OPEN / to revisit.** The formulation is correct, but tracking with `InfiniteHomographyHomotopy` is unreliable.
+
+### Location
+`src/lab.jl` — `infinite_homography_resection_homotopy(; random_seed=84564, cross_check=true)`, helper `quaternion_matrix(w, x, y, z)`.
+
+### Goal
+Use `InfiniteHomographyHomotopy` to track a meaningful unknown instead of a line intersection: the calibrated camera pose P = [R | t], going from view 1 (start, known pose) to view 2 (target).
+
+### Formulation
+- **Scene:** 4 3D lines, each through a point w_i (`randn(3)`) with direction / vanishing point v_i (unit `randn`). Two cameras from `random_camera_lookingat_center()` with shared known K.
+- **Calibrated coordinates:** observations are taken in normalized coordinates (`K \ camera.matrix` ≃ [R | t], with K = intrinsic ./ intrinsic[2,2], the same scaling `camera.matrix` uses). H_∞ is computed with `compute_Hinf` on the normalized VPs (≃ R₂R₁ᵀ). Its sign is flipped if needed so det(H) > 0, because `compute_Hinf` divides by H[3,3] and a negative det breaks `matrix_log`.
+- **Unknowns (6):** a, b, c, τ[1:3].
+  - Rotation R = R_rel(1, a, b, c) · R₁, with `quaternion_matrix(1,a,b,c) = |q|² R_rel`, which is polynomial in the unknowns.
+  - The scale |q|² is absorbed by τ, so to recover the pose: R = quaternion_matrix(...)·R₁ / s and t = τ / s, with s = 1 + a² + b² + c².
+  - The start solution is a = b = c = 0, τ = t₁.
+  - **Why relative to R₁:** an absolute quaternion with w = 1 was badly conditioned. Cameras looking at the origin often have w ≈ 0, which gave a, b, c ≈ 5–8, s ≈ 100 and τ ≈ 1700. The relative chart only breaks when the relative rotation is ≈180°.
+- **Parameters (12):** the 4 lines l_k (3 per line, matching the homotopy layout). Intersections come from the parameters as p_ik = cross(l_i, l_k).
+- **Constraints (6):** cross(R v_i, R w_i + τ) · p_ik = 0.
+  - Assignment (pair → line it constrains): p12→L1, p14→L1, p23→L2, p13→L3, p34→L3, p24→L4.
+  - Each line can take **at most 2** intersections. Its 3 intersections are collinear on l_i, so a 3rd adds nothing and makes the system singular.
+- **Degree and solution count:** each equation has degree 4, so the total degree is 4⁶ = 4096. There are 48 generic complex solutions (≈30 real in the default seed).
+
+### Findings
+1. **Formulation verified.** Residuals at both true poses are ≈1e-13, and the total-degree solve at view-2 parameters finds the ground-truth pose exactly.
+2. **Tracking fails: a real fold on the H_∞ path.** On seed 84564 the path stops at t ≈ 0.919 with `terminated_step_size_too_small`.
+   - Probing near that t shows the tracked real solution colliding with another real solution: their distance goes 0.74 → 0 and the real count drops 26 → 24. The pair turns complex and the Jacobian becomes singular.
+   - The lines are well-conditioned there: min |l_i × l_k| ≈ 0.09.
+   - The fold happens at the same t with both rotation charts, so it is not a chart artifact.
+3. **Seed sweep (20 seeds), square 6-equation system:**
+   - `InfiniteHomographyHomotopy`: 1/20 correct.
+   - Straight-line `ParameterHomotopy` p→q: 2/20.
+   - Even a **true camera path** fails 18/20. That path uses lines projected by an interpolated camera (slerp R, lerp t), tracked in 50 segments.
+4. **Root cause of 3: 6 of the 8 independent constraints.** 4 lines × 2 dof gives 8 independent constraints and the system uses only 6.
+   - The 6×6 Jacobian *at the true pose* can change sign along a real 1-D path, which is a codimension-1 event, so real paths hit it often.
+   - Example: seed 1, smallest singular value ≈1e-4 at s ≈ 0.3 along the camera path, even though the true pose is an exact solution for every s.
+   - Conditioning is generally poor: the smallest singular value is often 1e-3 to 1e-2. Cameras at distance ~17 looking at points near the origin are close to affine, so depth is weakly constrained.
+5. **Experiment: all 12 incidences** (every p_ik against both l_i and l_k), squared up with a random complex matrix via `RandomizedSystem(fixed(F12; compile=false), 6)`. The complex combination makes singularities codimension 2, so a real path generically avoids them.
+   - Camera path: **19/20** correct, which confirms finding 4.
+   - `InfiniteHomographyHomotopy`: always reaches t = 0, but lands on the true pose only **4/20**.
+   - Linear parameter path: 5/20.
+
+### Remaining limitation (main reason it doesn't work yet)
+The **H_∞ homotopy's parameter path does not come from a camera motion**.
+- The vanishing points move consistently with a rotating camera: v_t = exp((1-t) log H_∞) v₀.
+- But each line's second point, the intersection with its partner line, is interpolated **linearly** between the views.
+- So the lines in between are not the projection of the 3D lines by any camera. The tracked solution is not a true pose there, and the path can end on a spurious root at t = 0.
+- With a square real system this shows up as real folds. With the randomized overdetermined system it shows up as ending on the wrong solution.
+
+### Ideas to revisit
+- Use all 12 incidences plus `RandomizedSystem` (complex squaring-up) in the function, instead of the 6-constraint square system.
+- Make the non-VP part of the interpolation geometrically consistent with a camera motion. For example, also move the intersection points with a transformation (an interpolated homography or a plane-induced homography) rather than linearly. Then the true pose stays an exact solution along the whole path.
+- Or add a complex detour to the path (a γ-trick-like bump: p(t) + i·γ·t(1−t)·r) so it avoids real discriminant crossings. This would require `tp!` to stop taking `real(t)` and the interpolation to support complex values.
+- Check the conditioning of the setup itself: wider field of view, or 3D lines spread further from the origin.
+
+### How to reproduce
+```julia
+CylindersBasedCameraResectioning.Lab.infinite_homography_resection_homotopy(; random_seed=84564, cross_check=true)
+```
+- **Seed sweep:** call with `cross_check=false` over seeds 1:20. An empty returned pose list means tracking failed.
+- **Camera-path and `RandomizedSystem` comparisons:** these were ad-hoc scratch scripts, not committed. To redo them:
+  - Camera path: for s ∈ [0,1], R(s) = slerp(q₁, q₂, s) and t(s) = lerp. Project the lines, fix the line signs between segments, and track with `HomotopyContinuation.ParameterHomotopy` in 50 steps. `ParameterHomotopy` must be qualified because the project's `Homotopies` module exports a name that clashes with it.
+  - `RandomizedSystem` version: wrap the 12-equation system as in finding 5 and pass it to `InfiniteHomographyHomotopy` (multi-H_inf API with `collect(1:4)`).
+
+---
+
 ## Projective Geometry: Line Transformation Rule
 
 ### Key Concept

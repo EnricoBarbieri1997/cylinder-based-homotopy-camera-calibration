@@ -2,7 +2,7 @@ module Lab
     using HomotopyContinuation
     using DelimitedFiles
     using StatsBase
-    using LinearAlgebra: norm, normalize, dot, cross
+    using LinearAlgebra: norm, normalize, dot, cross, det
     using Rotations
     using LeastSquaresOptim
 
@@ -1114,5 +1114,181 @@ module Lab
         # display("  Solution at t=1 (view2 intersection): $solution_target")
 
         # return homotopy, cameras, vps_view1, vps_view2, lines_view1, lines_view2, Hinf
+    end
+
+    """
+    Rotation matrix of a (non necessarily unit) quaternion q = (w, x, y, z).
+    Returns |q|² R, so it is polynomial in the quaternion entries.
+    """
+    function quaternion_matrix(w, x, y, z)
+        return [
+            w^2+x^2-y^2-z^2  2*(x*y-w*z)      2*(x*z+w*y);
+            2*(x*y+w*z)      w^2-x^2+y^2-z^2  2*(y*z-w*x);
+            2*(x*z-w*y)      2*(y*z+w*x)      w^2-x^2-y^2+z^2
+        ]
+    end
+
+    """
+    Track a calibrated camera pose P = [R | t] from view 1 to view 2 with InfiniteHomographyHomotopy.
+
+    The scene has 4 3D lines, each through a point w_i with direction (vanishing point) v_i.
+    Their projections l_k are the homotopy parameters; the 6 pairwise intersections
+    p_ik = cross(l_i, l_k) give the constraints cross(P v_i, P w_i) ⋅ p_ik = 0.
+    Unknowns: quaternion (1, a, b, c) of the rotation relative to the start pose, R = R_rel * R₁
+    (so the start solution is a = b = c = 0 and the chart is well conditioned), and translation τ
+    (scaled by |q|²).
+    """
+    function infinite_homography_resection_homotopy(; random_seed=84564, cross_check=true)
+        Random.seed!(random_seed)
+
+        n_lines = 4
+
+        # Intersection p_ik = cross(l_i, l_k) constrains the projected line `owner`.
+        # Each line takes at most 2 intersections: its 3 intersections are collinear,
+        # so a 3rd one would be redundant and make the system singular.
+        assignment = [(1, 2, 1), (1, 4, 1), (2, 3, 2), (1, 3, 3), (3, 4, 3), (2, 4, 4)]
+
+        # 3D lines: direction (vanishing point) v_i and point w_i
+        vanishing_points_3d = [normalize(randn(3)) for _ in 1:n_lines]
+        points_3d = [randn(3) for _ in 1:n_lines]
+
+        # Create 2 random cameras with shared (known) intrinsics
+        intrinsics = [
+            rand_in_range(2500.0, 2700.0) 0.0 rand_in_range(950.0, 970.0);   # fₓ, skew, cₓ
+            0.0 rand_in_range(1400.0, 1600.0) rand_in_range(530.0, 550.0);   # 0, fᵧ, cᵧ
+            0.0 0.0 1.0                                                      # bottom row
+        ]
+
+        cameras = CameraProperties[]
+        for _ in 1:2
+            position, rotation = random_camera_lookingat_center()
+            camera = CameraProperties()
+            camera.position = position
+            camera.quaternion_rotation = rotation
+            camera.intrinsic = intrinsics
+            push!(cameras, camera)
+        end
+
+        # Calibrated camera matrices P = [R | t] (camera.matrix uses intrinsic ./ intrinsic[2, 2])
+        K = intrinsics ./ intrinsics[2, 2]
+        rotations_gt = [Matrix{Float64}(camera.rotation_matrix) for camera in cameras]
+        translations_gt = [-rotations_gt[i] * Vector{Float64}(cameras[i].position) for i in 1:2]
+        calibrated_matrices = [K \ camera.matrix for camera in cameras]
+        for i in 1:2
+            display("Camera $i: |K⁻¹P - [R|t]| = $(norm(calibrated_matrices[i] - hcat(rotations_gt[i], translations_gt[i])))")
+        end
+
+        # Observations in normalized (calibrated) coordinates
+        vps_views = [[normalize(P * [v; 0.0]) for v in vanishing_points_3d] for P in calibrated_matrices]
+        points_views = [[P * [w; 1.0] for w in points_3d] for P in calibrated_matrices]
+        lines_views = [[normalize(cross(vps_views[k][i], points_views[k][i])) for i in 1:n_lines] for k in 1:2]
+
+        # H_∞ in normalized coordinates (≃ R₂R₁ᵀ). Keep det > 0 so that matrix_log stays real.
+        pts1 = vcat([v[1:2]' ./ v[3] for v in vps_views[1]]...)
+        pts2 = vcat([v[1:2]' ./ v[3] for v in vps_views[2]]...)
+        Hinf = compute_Hinf(pts1, pts2)
+        Hinf = sign(det(Hinf)) * Hinf
+        Hinf_gt = rotations_gt[2] * rotations_gt[1]'
+        display("H_∞ (DLT) vs R₂R₁ᵀ, difference after scale normalisation: $(norm(Hinf / cbrt(det(Hinf)) - Hinf_gt))")
+
+        # Polynomial system: variables (a, b, c, τ), parameters l (4 lines)
+        @var a b c τ[1:3]
+        @var l[1:3, 1:n_lines]
+        R₁ = rotations_gt[1]
+        R_q = quaternion_matrix(1, a, b, c)
+        projected_lines = [cross(R_q * R₁ * vanishing_points_3d[i], R_q * R₁ * points_3d[i] + τ) for i in 1:n_lines]
+        line_params = [l[:, k] for k in 1:n_lines]
+        equations = [
+            sum(projected_lines[owner] .* cross(line_params[i], line_params[k]))
+            for (i, k, owner) in assignment
+        ]
+        F = System(equations; variables=[a, b, c, τ...], parameters=vec(l))
+
+        p = vcat(lines_views[1]...)  # start parameters (view 1)
+        q = vcat(lines_views[2]...)  # target parameters (view 2)
+
+        # Pose of a camera as a solution vector [a, b, c, τ] (quaternion of R * R₁ᵀ scaled so that w = 1)
+        function pose_to_solution(R, t)
+            quaternion = QuatRotation(R * R₁')
+            w, x, y, z = quaternion.q.s, quaternion.q.v1, quaternion.q.v2, quaternion.q.v3
+            a₀, b₀, c₀ = x / w, y / w, z / w
+            s = 1 + a₀^2 + b₀^2 + c₀^2
+            return [a₀, b₀, c₀, (s * t)...]
+        end
+
+        function solution_to_pose(sol)
+            s = 1 + sol[1]^2 + sol[2]^2 + sol[3]^2
+            return quaternion_matrix(1, sol[1], sol[2], sol[3]) * R₁ / s, sol[4:6] / s
+        end
+
+        function pose_errors(R, t, k)
+            rotation_error = rad2deg(acos(clamp((sum(diag_entries(R' * rotations_gt[k])) - 1) / 2, -1.0, 1.0)))
+            translation_error = norm(t - translations_gt[k])
+            return rotation_error, translation_error
+        end
+        diag_entries(M) = [M[i, i] for i in 1:3]
+
+        start_solution = pose_to_solution(rotations_gt[1], translations_gt[1])
+        target_solution = pose_to_solution(rotations_gt[2], translations_gt[2])
+        display("Relative rotation between views: $(rad2deg(rotation_angle(RotMatrix{3}(rotations_gt[2] * R₁'))))°")
+        display("Start pose check (solution → pose errors): $(pose_errors(solution_to_pose(start_solution)..., 1))")
+        display("Residual at start (view 1):  $(norm(F(start_solution, p)))")
+        display("Residual at target (view 2): $(norm(F(target_solution, q)))")
+
+        homotopy = InfiniteHomographyHomotopy(F, p, q, Hinf, vps_views[1])
+
+        display("Line / VP incidence along the path:")
+        for t in 0.0:0.25:1.0
+            incidences = [verify_line_through_vanishing_point(homotopy, i, t) for i in 1:n_lines]
+            display("  t=$t: $incidences")
+        end
+
+        result = solve(homotopy, [start_solution]; show_progress=true)
+        display(result)
+        display(path_results(result))
+
+        # NLS refinement on all 12 incidences (each intersection against both of its lines)
+        function refine_pose_nls(sol, lines)
+            pairs = [(i, k) for i in 1:n_lines for k in 1:n_lines if i != k]
+            function residual!(r, x)
+                R̃ = quaternion_matrix(1, x[1], x[2], x[3]) * R₁
+                for (j, (i, k)) in enumerate(pairs)
+                    projected = cross(R̃ * vanishing_points_3d[i], R̃ * points_3d[i] + x[4:6])
+                    r[j] = dot(normalize(projected), normalize(cross(lines[i], lines[k])))
+                end
+            end
+            result = optimize!(
+                LeastSquaresProblem(x = copy(sol), f! = residual!, output_length = length(pairs)),
+                LevenbergMarquardt()
+            )
+            return result.minimizer
+        end
+
+        sols = real_solutions(result)
+        display("Found $(length(sols)) real solutions:")
+        refined_poses = Tuple{Matrix{Float64},Vector{Float64}}[]
+        for (i, sol) in enumerate(sols)
+            R, t = solution_to_pose(sol)
+            display("  Solution $i: residual = $(norm(F(sol, q))), (rotation error °, translation error) = $(pose_errors(R, t, 2))")
+            refined = refine_pose_nls(sol, lines_views[2])
+            R̂, t̂ = solution_to_pose(refined)
+            display("    After NLS: residual = $(norm(F(refined, q))), errors = $(pose_errors(R̂, t̂, 2))")
+            push!(refined_poses, (R̂, t̂))
+        end
+
+        if !cross_check
+            return refined_poses, (rotations_gt[2], translations_gt[2])
+        end
+
+        # Cross-check: total degree solve at the target parameters
+        display("Cross-check with total degree solve at view 2...")
+        result_total_degree = solve(F; target_parameters=q, show_progress=true)
+        errors_total_degree = [pose_errors(solution_to_pose(sol)..., 2) for sol in real_solutions(result_total_degree)]
+        display("  $(nsolutions(result_total_degree)) solutions, $(length(errors_total_degree)) real")
+        if !isempty(errors_total_degree)
+            display("  Best real solution errors: $(errors_total_degree[argmin(sum.(errors_total_degree))])")
+        end
+
+        return refined_poses, (rotations_gt[2], translations_gt[2])
     end
 end
