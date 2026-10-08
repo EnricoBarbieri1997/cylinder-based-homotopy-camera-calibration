@@ -4,7 +4,6 @@ export stack_homotopy_parameters, build_intrinsic_rotation_conic_system, build_i
 using ..CylindersBasedCameraResectioning: IMAGE_HEIGHT, IMAGE_WIDTH
 using ..Camera: IntrinsicParameters, build_camera_matrix
 using ..Space: build_rotation_matrix
-using ..Utils: angle_between_3D_directions
 
 using HomotopyContinuation
 using LinearAlgebra: det, I, rank, cross
@@ -89,21 +88,6 @@ end
 
 end
 
-"""
-    inv_upper3(K)
-
-Closed-form inverse of a general upper-triangular 3x3 matrix
-K = [a b c; 0 d e; 0 0 f], via back-substitution. Symbolic-safe.
-"""
-function inv_upper3(K)
-    a, b, c = K[1,1], K[1,2], K[1,3]
-    d, e    = K[2,2], K[2,3]
-    f       = K[3,3]
-
-    return [1/a   -b/(a*d)   (b*e - c*d)/(a*d*f);
-            0      1/d       -e/(d*f);
-            0      0          1/f]
-end
 
 function stack_homotopy_parameters(parameters...)
     stacked_parameters = []
@@ -169,70 +153,9 @@ function build_intrinsic_rotation_conic_system(
         0 0 factor
     ]
 
-    Kinv = inv_upper3(intrinsic)
-    ω = fₓ^2 * fᵧ^2 * (Kinv' * Kinv)
-
-    ω = expand.(ω)
-
-    display("---w---")
-    display(ω)
-    display("-------")
-
-    IAC_constraints = []
-
-    for (index_p, problem) in enumerate(problems)
-        lines_count = size(problem.lines)[1]
-        used_lines = []
-        vanishing_points_pointsatinifinity_pairs = []
-        # For each line, extract the matching point at inifinity, find another line with the same point at inifinity,
-        # if found, calculate the vanishing point and pair it with the point at infinity, and add it to the list of pairs
-        for index_l in 1:lines_count
-            if (index_l in used_lines)
-                continue
-            end
-            line = problem.lines[index_l, :]
-            point_at_infinity = problem.points_at_infinity[index_l, :]
-            matching_line_indexes = []
-            for index_l2 in index_l:lines_count
-                if (index_l2 != index_l) && (problem.points_at_infinity[index_l2, :] == point_at_infinity)
-                    push!(matching_line_indexes, index_l2)
-                end
-            end
-            if length(matching_line_indexes) < 1
-                continue
-            end
-            matching_line_index = matching_line_indexes[findfirst(x -> x != index_l, matching_line_indexes)]
-            if matching_line_index !== nothing
-                matching_line = problem.lines[matching_line_index, :]
-                vanishing_point = cross(line, matching_line)
-                push!(vanishing_points_pointsatinifinity_pairs, (vanishing_point, point_at_infinity))
-            end
-            push!(used_lines, index_l)
-            for (matching_line_index) in matching_line_indexes
-                push!(used_lines, matching_line_index)
-            end
-        end
-
-        # If at least two pairs of vanishing points and points at infinity are found, add the IAC constraints to the system
-        if length(vanishing_points_pointsatinifinity_pairs) >= 2
-            for (vp1, pai1) in vanishing_points_pointsatinifinity_pairs
-                for (vp2, pai2) in vanishing_points_pointsatinifinity_pairs
-                    if vp1 != vp2
-                        num = vp1' * ω * vp2
-                        den = sqrt((vp1' * ω * vp1) * (vp2' * ω * vp2))
-                        θ = angle_between_3D_directions(pai1, pai2)
-                        push!(IAC_constraints, num / den - cos(θ))
-                    end
-                end
-            end
-        end
-    end
-
-    push!(system_to_solve, IAC_constraints...)
-
     intrinsic_count = count_ones(UInt8(intrinsic_configuration))
     extrinsic_count = size(problems)[1] * 3
-    lines_count = intrinsic_count + extrinsic_count - length(IAC_constraints)
+    lines_count = intrinsic_count + extrinsic_count
     lines_per_problem = zeros(Int64, problems_count)
 
     problem_index = 1
