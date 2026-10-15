@@ -258,6 +258,105 @@ The pencil basis vectors `e₀, f₀` are **lines** (not points). They span the 
 
 ---
 
+## Custom homotopy implementation bugs that make tracking fragile (2026-10-15)
+
+These are **implementation bugs** in the project's custom homotopies — distinct
+from the geometric/path analysis above. They cause spurious tracking failures
+on seeds that should work, and were uncovered while building
+`src/visualizations.jl` (the four-homotopy comparison harness that drives
+`Lab.infinite_homography_resection_homotopy`'s toy problem through
+InfiniteHomographyHomotopy / GeometricHomotopy / ParameterHomotopy / total
+degree in parallel).
+
+### 1. `GeometricHomotopy` — wrong Taylor derivative
+
+**File:** `src/homotopies/geometric-homotopy.jl`, in `tp!` (~L152–156):
+
+```julia
+@inbounds for i = 1:length(H.taylor_pt)
+    ptᵢ = parameters[i]                       # geometric interpolation
+    H.pt[i] = ptᵢ
+    H.taylor_pt[i] = (ptᵢ, H.p[i] - H.q[i])   # ← straight-line derivative!
+end
+```
+
+The geometric interpolation computes `ptᵢ` by rotating lines around their
+intersection point, but the Taylor coefficient (`∂pt/∂t`) is set to the
+*straight-line* parameter derivative `p − q`. HC's `Tracker` uses this
+derivative inside its predictor, mispredicts almost every step, and either
+converges extremely slowly or hits `terminated_step_size_too_small`.
+
+**Observed on the camera-tracking toy problem:**
+- seed 84564: **7228 steps**, terminates at `t ≈ 0.959` (barely moved from `t=1`).
+- seed 1111: **7021 steps**, terminates at `t ≈ 0.244`.
+- seed 999: **8673 steps**, terminates at `t ≈ 0.807`.
+- For comparison the straight-line `HomotopyContinuation.ParameterHomotopy`
+  settles its fate in **< 60 steps** (success or failure); HC's own
+  predictor gets the Taylor derivative right because the parameters are
+  linear in `t`.
+
+**Fix (two options):**
+1. **Numerical derivative** (safest, mirrors `InfiniteHomographyHomotopy.tp!`):
+   compute `parameters` at `t ± ε` and set
+   `H.taylor_pt[i] = (ptᵢ, (params_hi[i] − params_lo[i]) / (2ε))`.
+2. **Analytical derivative** — the geometric interpolation is a rotation
+   around the intersection point by angle `θ(t) = (1−t)·angles_between[i]`,
+   so `dpt/dt` is `dR/dθ · dθ/dt` applied to the two reference points. Faster
+   but more code to maintain. (1) is the pragmatic choice.
+
+### 2. Custom `ParameterHomotopy` in `src/homotopies/ph.jl` — aggressive `round_u!`
+
+```julia
+function round_u!(u)
+    for i in eachindex(u)
+        if norm(u[i]) < 1e-6
+            u[i] = 0.0 + 0.0im
+        end
+    end
+end
+
+function ModelKit.evaluate!(u, H::ParameterHomotopy, x, t)
+    tp!(H, t); evaluate!(u, H.F, x, H.pt); round_u!(u); u
+end
+function ModelKit.evaluate_and_jacobian!(u, U, H::ParameterHomotopy, x, t)
+    tp!(H, t); evaluate_and_jacobian!(u, U, H.F, x, H.pt); round_u!(u); u
+end
+```
+
+`round_u!` zeros out residuals (and the output-vector arg in
+`evaluate_and_jacobian!`) whose magnitude is below `1e-6`. On the
+camera-tracking toy problem the start-point residual is ~`1e-16`, which
+gets rounded to 0 — fine on its own, but HC's `init_newton!` interprets
+*any* non-converging first Newton step on a start with residual exactly 0
+as "invalid start value" and terminates with
+`terminated_invalid_startvalue` after recording a single step.
+
+**Observed:** feeding the camera-tracking toy's `start_sol` into this
+`ParameterHomotopy` gives `1 step, terminated_invalid_startvalue`.
+Replacing it with `HomotopyContinuation.ParameterHomotopy` (which omits
+`round_u!`) succeeds or fails for geometric reasons — not initialization.
+
+**Fix (preference order):**
+1. Delete `round_u!` entirely. The function pre-dates the project's use of
+   HC's `Tracker` and seems to have been debugging scaffolding.
+2. Lower the threshold to something innocuous (e.g. `1e-14`).
+3. Apply it to residuals only, not the Jacobian argument.
+
+### What to validate after fixing
+
+Re-run `run_four_homotopies_tracking(; random_seed=84564)` and confirm:
+- GeometricHomotopy terminates in **< 200 steps** (comparable to the other
+  parameter-space methods), not 7000+.
+- Custom `ParameterHomotopy` records **more than 1 step** on seeds where
+  `HomotopyContinuation.ParameterHomotopy` records many.
+
+These two fixes won't make the toy problem *converge* on seed 84564
+(the geometric real-fold issue described in the resection homotopy entry
+is deeper), but they will give the slider visualization honest paths to
+compare, instead of implementation artifacts.
+
+---
+
 ## General Notes
 
 ### Environment
