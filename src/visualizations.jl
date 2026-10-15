@@ -303,31 +303,14 @@ module Visualizations
         return data
     end
 
-    """
-        _closest_step_index(steps, t_target)
-
-    Linear scan — the step vectors are at most a few hundred entries, so this is
-    plenty fast and avoids an extra dependency on a sorted search helper.
-    """
-    function _closest_step_index(steps::Vector{Tuple{Float64, Vector{ComplexF64}}}, t_target::Real)
-        best_idx = 1
-        best_diff = Inf
-        @inbounds for i in eachindex(steps)
-            d = abs(steps[i][1] - t_target)
-            if d < best_diff
-                best_diff = d
-                best_idx = i
-            end
-        end
-        return best_idx
-    end
-
     # ───────────────────── GLMakie-dependent visualization ─────────────────────
     #
     # The function below only works if GLMakie is loaded. We define it in a
     # separate code block so that `include`-ing this file never requires a
     # display, mirroring the Plotting module's conditional loading pattern.
 
+    display(GUI_ENABLED)
+    display(Base.find_package("GLMakie"))
     if GUI_ENABLED && Base.find_package("GLMakie") !== nothing
         include("visualizations-makie.jl")
     else
