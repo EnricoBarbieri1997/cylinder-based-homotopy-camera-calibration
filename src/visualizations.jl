@@ -1,6 +1,12 @@
 module Visualizations
     export run_four_homotopies_tracking,
+           run_four_homotopies_all_converge,
+           run_four_homotopies_right_track,
+           run_four_homotopies_partial_converge,
            visualize_four_homotopies,
+           visualize_four_homotopies_all_converge,
+           visualize_four_homotopies_right_track,
+           visualize_four_homotopies_partial_converge,
            setup_toy_problem,
            track_with_steps,
            solution_to_pose,
@@ -301,6 +307,75 @@ module Visualizations
         serialize(save_path, data)
         @info "Saved tracked paths to $save_path"
         return data
+    end
+
+    """
+        run_four_homotopies_all_converge(; save_path=...)
+
+    Preset seed where all four homotopies — InfiniteHomography, Geometric,
+    Parameter and TotalDegree — converge to the target camera pose.
+    """
+    function run_four_homotopies_all_converge(;
+            save_path::String="./tmp/four_homotopies_all_converge.jls")
+        return run_four_homotopies_tracking(;
+            random_seed=67, save_path=save_path)
+    end
+
+    """
+        run_four_homotopies_right_track(; save_path=...)
+
+    Preset seed where every tracked path ends up closer to the target
+    solution than it started, yet only TotalDegree actually reaches the
+    target. Useful for showing "right direction, wrong termination" for the
+    three straight-line homotopies.
+    """
+    function run_four_homotopies_right_track(;
+            save_path::String="./tmp/four_homotopies_right_track.jls")
+        return run_four_homotopies_tracking(;
+            random_seed=99, save_path=save_path)
+    end
+
+    """
+        run_four_homotopies_partial_converge(; save_path=...)
+
+    Preset seed where TotalDegree converges to the target together with two
+    of the three straight-line homotopies (Geometric and Parameter), while
+    InfiniteHomography fails to reach the target.
+    """
+    function run_four_homotopies_partial_converge(;
+            save_path::String="./tmp/four_homotopies_partial_converge.jls")
+        return run_four_homotopies_tracking(;
+            random_seed=90, save_path=save_path)
+    end
+
+    """
+        visualize_four_homotopies_all_converge(data_path=...)
+
+    Visualize the tracked paths produced by [`run_four_homotopies_all_converge`](@ref).
+    """
+    function visualize_four_homotopies_all_converge(
+            data_path::String="./tmp/four_homotopies_all_converge.jls")
+        return visualize_four_homotopies(data_path)
+    end
+
+    """
+        visualize_four_homotopies_right_track(data_path=...)
+
+    Visualize the tracked paths produced by [`run_four_homotopies_right_track`](@ref).
+    """
+    function visualize_four_homotopies_right_track(
+            data_path::String="./tmp/four_homotopies_right_track.jls")
+        return visualize_four_homotopies(data_path)
+    end
+
+    """
+        visualize_four_homotopies_partial_converge(data_path=...)
+
+    Visualize the tracked paths produced by [`run_four_homotopies_partial_converge`](@ref).
+    """
+    function visualize_four_homotopies_partial_converge(
+            data_path::String="./tmp/four_homotopies_partial_converge.jls")
+        return visualize_four_homotopies(data_path)
     end
 
     # ───────────────────── GLMakie-dependent visualization ─────────────────────
