@@ -1,5 +1,6 @@
 module CylindersBasedCameraResectioning
     const GUI_ENABLED = get(ENV, "GUI_ENABLED", "true") == "true"
+    display("GUI_ENABLED: $GUI_ENABLED")
     const ASSERTS_ENABLED = get(ENV, "ASSERTS_ENABLED", "false") == "true"
     const IMAGE_HEIGHT = 1080
     const IMAGE_WIDTH = 1920
