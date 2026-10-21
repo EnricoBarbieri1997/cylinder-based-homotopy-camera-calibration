@@ -130,7 +130,9 @@ function visualize_four_homotopies(data_path::String=default_tracked_path)
     axes_2d = Dict{String, Any}()
     for (i, name) in enumerate(HOMOTOPY_ORDER)
         color = HOMOTOPY_COLORS[name]
-        ax = Axis(grid_right[i, 1]; title=name, titlecolor=color,
+        row = ((i - 1) ÷ 2) + 1
+        col = ((i - 1) % 2) + 1
+        ax = Axis(grid_right[row, col]; title=name, titlecolor=color,
                   aspect=DataAspect(), yreversed=true)
         axes_2d[name] = ax
     end
