@@ -324,15 +324,16 @@ module Visualizations
     """
         run_four_homotopies_right_track(; save_path=...)
 
-    Preset seed where every tracked path ends up closer to the target
-    solution than it started, yet only TotalDegree actually reaches the
-    target. Useful for showing "right direction, wrong termination" for the
-    three straight-line homotopies.
+    Preset seed where every tracked camera pose ends up closer (in world
+    coordinates) to the target camera than its starting pose, yet only
+    TotalDegree actually reaches the target. Useful for showing
+    "right direction, wrong termination" for the three straight-line
+    homotopies.
     """
     function run_four_homotopies_right_track(;
             save_path::String="./tmp/four_homotopies_right_track.jls")
         return run_four_homotopies_tracking(;
-            random_seed=99, save_path=save_path)
+            random_seed=52, save_path=save_path)
     end
 
     """
